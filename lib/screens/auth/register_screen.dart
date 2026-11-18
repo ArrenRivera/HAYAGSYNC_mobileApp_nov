@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'dart:io';
 import '../../models/user_model.dart';
 import 'package:file_picker/file_picker.dart';
 import '../../services/database_service.dart';
 import '../../services/ai_service.dart';
+import '../../widgets/student_ocr_review_dialog.dart';
 import '../parent/parent_dashboard.dart';
 import 'terms_screen.dart';
 
@@ -16,6 +18,7 @@ class RegisterScreen extends StatefulWidget {
 class _RegisterScreenState extends State<RegisterScreen> {
   final _formKey = GlobalKey<FormState>();
   final _parentNameController = TextEditingController();
+  final _contactNumberController = TextEditingController();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
 
@@ -23,6 +26,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
   bool _isLoading = false;
   String? _errorMessage;
   bool _agreeToTerms = false;
+  String? _selectedCertificatePath;
+  String? _selectedCertificateName;
+  bool _isScanningCertificate = false;
+  bool _certificateScanSucceeded = false;
+  bool _certificateScanFailed = false;
 
   final _db = DatabaseService();
   final _ai = AIService();
@@ -31,6 +39,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
   @override
   void dispose() {
     _parentNameController.dispose();
+    _contactNumberController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
     _termsScrollController.dispose();
@@ -39,68 +48,26 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   Future<void> _pickCertificateFromDevice() async {
     try {
-      final result = await FilePicker.platform.pickFiles(type: FileType.any);
+      final result = await FilePicker.platform.pickFiles(type: FileType.image);
       if (result != null && result.files.isNotEmpty) {
         final file = result.files.first;
         final name = file.name;
+        final path = file.path;
 
         setState(() {
           _isLoading = true;
+          _isScanningCertificate = true;
           _errorMessage = null;
+          _selectedCertificatePath = path;
+          _selectedCertificateName = name;
+          _certificateScanSucceeded = false;
+          _certificateScanFailed = false;
         });
 
-        // Run OCR verification immediately
-        final parentName = _parentNameController.text.trim().isEmpty
-            ? 'PARENT'
-            : _parentNameController.text.trim();
-        String extractedStudentName = '';
-        String extractedSection = '';
-
-        if (name.contains('10388171') ||
-            name.toLowerCase().contains('coles') ||
-            name.toLowerCase().contains('kyle') ||
-            name.toLowerCase().contains('pring')) {
-          extractedStudentName = 'Coles, Kyle Pring';
-          extractedSection = 'GRADE 11 STEM-A';
-        } else {
-          String fileName = name;
-          if (fileName.contains('.')) {
-            fileName = fileName.substring(0, fileName.lastIndexOf('.'));
-          }
-          fileName = fileName.replaceAll('_', ' ');
-
-          if (fileName.contains(' - ')) {
-            final parts = fileName.split(' - ');
-            extractedStudentName = parts[0].trim();
-            extractedSection = parts.sublist(1).join(' - ').trim();
-          } else if (fileName.contains('-')) {
-            final parts = fileName.split('-');
-            extractedStudentName = parts[0].trim();
-            extractedSection = parts.sublist(1).join('-').trim();
-          } else {
-            extractedStudentName = fileName.trim();
-            extractedSection = 'GRADE 11 STEM-A';
-          }
+        if (path == null) {
+          throw Exception('The selected image could not be opened.');
         }
-
-        final isOutdated =
-            name.toLowerCase().contains('outdated') ||
-            name.toLowerCase().contains('2024') ||
-            name.toLowerCase().contains('2025');
-        final isInvalid =
-            name.toLowerCase().contains('invalid') ||
-            name.toLowerCase().contains('not_enrolled');
-
-        final status = isInvalid ? 'NOT ENROLLED' : 'ENROLLED';
-        final ay = isOutdated ? '2024-2025' : '2026-2027';
-
-        final certMockText =
-            'STATUS: $status. STUDENT: $extractedStudentName. PARENT: ${parentName.toUpperCase()}. SECTION: $extractedSection. AY: $ay. FILE: $name';
-
-        final ocrResult = await _ai.scanEnrollmentCertificate(
-          name,
-          certMockText,
-        );
+        final ocrResult = await _ai.scanEnrollmentCertificate(path);
 
         if (!ocrResult.success) {
           throw Exception(
@@ -108,24 +75,41 @@ class _RegisterScreenState extends State<RegisterScreen> {
           );
         }
 
+        if (!mounted) return;
+        final reviewed = await showStudentOcrReviewDialog(context, ocrResult);
+        if (!mounted) return;
+        if (reviewed == null) {
+          setState(() {
+            _isLoading = false;
+            _isScanningCertificate = false;
+          });
+          return;
+        }
+
         // Add to verified children list
         setState(() {
           _verifiedChildren.add({
-            'studentName': ocrResult.studentName!,
-            'sectionName': ocrResult.studentSection!,
-            'gradeLevel': ocrResult.studentGrade!,
-            'academicYear': ocrResult.academicYear!,
+            'studentName': reviewed.studentName!,
+            'sectionName': reviewed.studentSection!,
+            'gradeLevel': reviewed.studentGrade!,
+            'academicYear': reviewed.academicYear ?? '',
             'certificateFilename': name,
-            'certificateContentMock': certMockText,
+            'studentNumber': reviewed.studentNumber!,
+            'firstName': reviewed.firstName!,
+            'lastName': reviewed.lastName!,
+            'middleInitial': reviewed.middleInitial!,
+            'gender': reviewed.gender!,
           });
           _isLoading = false;
+          _isScanningCertificate = false;
+          _certificateScanSucceeded = true;
         });
 
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Verified child: ${ocrResult.studentName} (${ocrResult.studentSection})',
+              'Child confirmed: ${reviewed.studentName} (${reviewed.studentSection})',
             ),
           ),
         );
@@ -133,6 +117,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
     } catch (e) {
       setState(() {
         _isLoading = false;
+        _isScanningCertificate = false;
+        _certificateScanFailed = _selectedCertificatePath != null;
         _errorMessage = e.toString().replaceAll('Exception: ', '');
       });
     }
@@ -140,6 +126,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   Future<void> _handleRegister() async {
     if (!_formKey.currentState!.validate()) return;
+    if (_verifiedChildren.isEmpty) {
+      setState(() {
+        _errorMessage =
+            'Scan and verify a Certificate of Matriculation (COM) for at least one child before registering.';
+      });
+      return;
+    }
 
     setState(() {
       _isLoading = true;
@@ -150,8 +143,17 @@ class _RegisterScreenState extends State<RegisterScreen> {
       final first = _verifiedChildren.isEmpty
           ? <String, String>{}
           : _verifiedChildren.first;
+      final childrenForRegistration = _verifiedChildren
+          .map(
+            (child) => {
+              ...child,
+              'parentFullName': _parentNameController.text.trim(),
+            },
+          )
+          .toList();
       final newParent = await _db.registerParent(
         name: _parentNameController.text.trim(),
+        contactNumber: _contactNumberController.text.trim(),
         email: _emailController.text.trim(),
         password: _passwordController.text,
         studentName: first['studentName'] ?? '',
@@ -159,7 +161,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         gradeLevel: first['gradeLevel'] ?? '',
         academicYear: first['academicYear'] ?? '',
         certificateFilename: first['certificateFilename'] ?? '',
-        verifiedChildren: _verifiedChildren,
+        verifiedChildren: childrenForRegistration,
       );
 
       if (_db.currentUser == null) {
@@ -169,7 +171,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
           builder: (context) => AlertDialog(
             title: const Text('Check your email'),
             content: Text(
-              'Na-create ang account para sa ${newParent.email}. I-confirm ang email bago mag-sign in.',
+              'Your account has been created for ${newParent.email}. Confirm your email address before signing in.',
             ),
             actions: [
               TextButton(
@@ -439,6 +441,47 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           ),
                           const SizedBox(height: 16),
 
+                          const Text(
+                            'Parent / Guardian Contact Number (Mobile or Landline)',
+                            style: TextStyle(
+                              color: Color(0xFF475569),
+                              fontWeight: FontWeight.w500,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          TextFormField(
+                            controller: _contactNumberController,
+                            keyboardType: TextInputType.phone,
+                            textInputAction: TextInputAction.next,
+                            style: const TextStyle(
+                              color: Color(0xFF0F172A),
+                              fontSize: 14,
+                            ),
+                            decoration: _inputDecoration(
+                              '+63 912 345 6789 or (02) 8123 4567',
+                              Icons.phone_outlined,
+                            ),
+                            validator: (value) {
+                              final contact = value?.trim() ?? '';
+                              if (contact.isEmpty) {
+                                return 'Please enter a mobile or landline number.';
+                              }
+                              if (!RegExp(r'^[0-9+().\-\s]+$').hasMatch(contact)) {
+                                return 'Enter a valid phone number.';
+                              }
+                              final digits = contact.replaceAll(
+                                RegExp(r'\D'),
+                                '',
+                              );
+                              if (digits.length < 7 || digits.length > 15) {
+                                return 'Enter a number with 7 to 15 digits.';
+                              }
+                              return null;
+                            },
+                          ),
+                          const SizedBox(height: 16),
+
                           // Email
                           const Text(
                             'Email Address',
@@ -539,7 +582,28 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                             ),
                                           ),
                                           Text(
+                                            'Last: ${child['lastName']} · First: ${child['firstName']} · MI: ${child['middleInitial']}',
+                                            style: const TextStyle(
+                                              color: Color(0xFF475569),
+                                              fontSize: 11,
+                                            ),
+                                          ),
+                                          Text(
                                             '${child['gradeLevel']} - ${child['sectionName']}',
+                                            style: const TextStyle(
+                                              color: Color(0xFF475569),
+                                              fontSize: 11,
+                                            ),
+                                          ),
+                                          Text(
+                                            'Student No.: ${child['studentNumber']} · Gender: ${child['gender']}',
+                                            style: const TextStyle(
+                                              color: Color(0xFF475569),
+                                              fontSize: 11,
+                                            ),
+                                          ),
+                                          Text(
+                                            'Parent/Guardian: ${_parentNameController.text.trim().isEmpty ? 'Use the name above' : _parentNameController.text.trim()}',
                                             style: const TextStyle(
                                               color: Color(0xFF475569),
                                               fontSize: 11,
@@ -569,7 +633,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
                           // Certificate Upload Header
                           const Text(
-                            'Enrollment Verification (Optional)',
+                            'Certificate of Matriculation (COM) (Required)',
                             style: TextStyle(
                               color: Color(0xFF0F172A),
                               fontSize: 14,
@@ -578,7 +642,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           ),
                           const SizedBox(height: 6),
                           const Text(
-                            'Upload a student\'s enrollment form to link them to your account. You can register multiple children or do this later from your settings.',
+                            'Upload and scan a clear Certificate of Matriculation (COM) for at least one child to create your account. You may add additional children later.',
                             style: TextStyle(
                               color: Color(0xFF64748B),
                               fontSize: 12,
@@ -586,27 +650,120 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           ),
                           const SizedBox(height: 12),
 
-                          ElevatedButton.icon(
-                            onPressed: _pickCertificateFromDevice,
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.white,
-                              foregroundColor: const Color(0xFF475569),
-                              elevation: 0,
-                              side: const BorderSide(color: Color(0xFFE2E8F0)),
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8),
+                          InkWell(
+                            onTap: _isLoading
+                                ? null
+                                : _pickCertificateFromDevice,
+                            borderRadius: BorderRadius.circular(10),
+                            child: Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: _certificateScanSucceeded
+                                    ? const Color(0xFFF0FDF4)
+                                    : _certificateScanFailed
+                                    ? const Color(0xFFFEF2F2)
+                                    : const Color(0xFFF1F5F9),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: _certificateScanSucceeded
+                                      ? const Color(0xFF22C55E)
+                                      : _certificateScanFailed
+                                      ? const Color(0xFFEF4444)
+                                      : const Color(0xFFCBD5E1),
+                                  width: _certificateScanSucceeded ? 2 : 1,
+                                ),
                               ),
-                            ),
-                            icon: const Icon(
-                              Icons.upload_file_outlined,
-                              color: Color(0xFF16A34A),
-                            ),
-                            label: const Text(
-                              'Scan Student Enrollment Form',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
+                              child: Column(
+                                children: [
+                                  if (_selectedCertificatePath != null)
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(6),
+                                      child: Image.file(
+                                        File(_selectedCertificatePath!),
+                                        height: 150,
+                                        width: double.infinity,
+                                        fit: BoxFit.contain,
+                                        errorBuilder: (_, _, _) =>
+                                            const SizedBox(
+                                              height: 100,
+                                              child: Icon(
+                                                Icons.broken_image_outlined,
+                                                size: 36,
+                                                color: Color(0xFF64748B),
+                                              ),
+                                            ),
+                                      ),
+                                    )
+                                  else
+                                    const SizedBox(
+                                      height: 100,
+                                      child: Center(
+                                        child: Icon(
+                                          Icons.image_outlined,
+                                          size: 38,
+                                          color: Color(0xFF94A3B8),
+                                        ),
+                                      ),
+                                    ),
+                                  const SizedBox(height: 8),
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        _certificateScanSucceeded
+                                            ? Icons.check_circle
+                                            : _certificateScanFailed
+                                            ? Icons.error_outline
+                                            : Icons.upload_file_outlined,
+                                        color: _certificateScanSucceeded
+                                            ? const Color(0xFF16A34A)
+                                            : _certificateScanFailed
+                                            ? const Color(0xFFDC2626)
+                                            : const Color(0xFF64748B),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              _selectedCertificateName ??
+                                                  'Upload Certificate of Matriculation (COM)',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color:
+                                                    _selectedCertificatePath ==
+                                                        null
+                                                    ? const Color(0xFF475569)
+                                                    : const Color(0xFF166534),
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 13,
+                                              ),
+                                            ),
+                                            Text(
+                                              _isScanningCertificate
+                                                  ? 'Scanning the certificate with OCR…'
+                                                  : _certificateScanSucceeded
+                                                  ? 'Scan complete · Ready to register'
+                                                  : _certificateScanFailed
+                                                  ? 'Some fields could not be read · review the message above'
+                                                  : _selectedCertificatePath ==
+                                                        null
+                                                  ? 'Select a COM image to begin scanning'
+                                                  : 'File selected · Tap to scan again',
+                                              style: const TextStyle(
+                                                fontSize: 11,
+                                                color: Color(0xFF64748B),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
                               ),
                             ),
                           ),

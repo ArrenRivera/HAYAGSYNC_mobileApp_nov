@@ -6,6 +6,7 @@ class UserModel {
   final String id;
   final String email;
   final String name;
+  final String? contactNumber;
   final UserRole role;
   final String? avatarUrl;
   
@@ -24,6 +25,7 @@ class UserModel {
     required this.email,
     required this.name,
     required this.role,
+    this.contactNumber,
     this.avatarUrl,
     this.assignedSection,
     this.studentName,
@@ -57,6 +59,7 @@ class UserModel {
       'id': id,
       'email': email,
       'name': name,
+      'contactNumber': contactNumber,
       'role': role.toString().split('.').last,
       'avatarUrl': avatarUrl,
       'assignedSection': assignedSection,
@@ -73,6 +76,7 @@ class UserModel {
       id: json['id'].toString(),
       email: json['email'],
       name: json['name'],
+      contactNumber: json['contactNumber'] ?? json['contact_number'],
       role: UserRole.values.firstWhere(
         (e) => e.toString().split('.').last == json['role'],
         orElse: () => UserRole.parent,
@@ -91,6 +95,7 @@ class UserModel {
 
   UserModel copyWith({
     String? name,
+    String? contactNumber,
     String? avatarUrl,
     String? studentName,
     String? studentGrade,
@@ -102,6 +107,7 @@ class UserModel {
       id: id,
       email: email,
       name: name ?? this.name,
+      contactNumber: contactNumber ?? this.contactNumber,
       role: role,
       avatarUrl: avatarUrl ?? this.avatarUrl,
       assignedSection: assignedSection,

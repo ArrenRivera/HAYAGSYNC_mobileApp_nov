@@ -41,7 +41,6 @@ class _AdviserSubmitReportScreenState extends State<AdviserSubmitReportScreen> {
 
   String? _evidenceFileName;
   PlatformFile? _selectedEvidenceFile;
-  bool _isAnalyzingEvidence = false;
   PhotoVerificationResult? _aiVerificationResult;
   bool _isSubmitting = false;
 
@@ -193,24 +192,37 @@ class _AdviserSubmitReportScreenState extends State<AdviserSubmitReportScreen> {
 
       if (result != null && result.files.isNotEmpty) {
         final file = result.files.first;
+        final ext = file.extension?.toLowerCase() ?? '';
+        final maxBytes = {'jpg', 'jpeg', 'png'}.contains(ext)
+            ? 5 * 1024 * 1024
+            : ext == 'mp4'
+            ? 20 * 1024 * 1024
+            : ext == 'pdf'
+            ? 10 * 1024 * 1024
+            : 0;
+        if (maxBytes == 0 || file.size > maxBytes) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  maxBytes == 0
+                      ? 'Unsupported evidence file type.'
+                      : 'Maximum file size is ${maxBytes ~/ (1024 * 1024)} MB.',
+                ),
+              ),
+            );
+          }
+          return;
+        }
         setState(() {
           _evidenceFileName = file.name;
           _selectedEvidenceFile = file;
-          _isAnalyzingEvidence = true;
-          _aiVerificationResult = null;
+          _aiVerificationResult = PhotoVerificationResult(
+            state: 'Selected - Upload on Submit',
+            details:
+                'The file will upload with the report and then await staff review.',
+          );
         });
-
-        final verification = await _aiService.verifyEvidencePhoto(
-          file.name,
-          file.size / 1024,
-        );
-
-        if (mounted) {
-          setState(() {
-            _aiVerificationResult = verification;
-            _isAnalyzingEvidence = false;
-          });
-        }
       }
     } catch (e) {
       if (mounted) {
@@ -257,6 +269,30 @@ class _AdviserSubmitReportScreenState extends State<AdviserSubmitReportScreen> {
       String? evidencePath;
       if (_selectedEvidenceFile != null) {
         final file = _selectedEvidenceFile!;
+        final ext = file.extension?.toLowerCase() ?? '';
+        final maxBytes = {'jpg', 'jpeg', 'png', 'gif', 'webp'}.contains(ext)
+            ? 5 * 1024 * 1024
+            : {'mp4', 'mov', 'webm', '3gp'}.contains(ext)
+            ? 20 * 1024 * 1024
+            : ext == 'pdf'
+            ? 10 * 1024 * 1024
+            : 0;
+        if (maxBytes == 0 || file.size > maxBytes) {
+          throw Exception(
+            'Unsupported file type or file exceeds its size limit.',
+          );
+        }
+        if ({'jpg', 'jpeg', 'png', 'gif', 'webp'}.contains(ext)) {
+          final path = file.path;
+          if (path == null) {
+            throw Exception('The selected image could not be screened.');
+          }
+          final screening = await _aiService.screenEvidencePhoto(
+            path,
+            file.name,
+          );
+          if (screening.rejected) throw Exception(screening.details);
+        }
         final bytes =
             file.bytes ??
             (file.path == null ? null : await File(file.path!).readAsBytes());
@@ -281,7 +317,9 @@ class _AdviserSubmitReportScreenState extends State<AdviserSubmitReportScreen> {
         studentGrade: _selectedGrade,
         studentId: _selectedStudent?.id,
         evidenceUrl: evidencePath,
-        evidenceVerificationState: _aiVerificationResult?.state ?? 'Verified',
+        evidenceVerificationState: evidencePath == null
+            ? 'No evidence uploaded'
+            : 'Uploaded - Awaiting Review',
         evidenceVerificationDetails: _aiVerificationResult?.details,
         aiSummary: aiSummaryText,
         bullyName: bullyName,
@@ -1025,6 +1063,14 @@ class _AdviserSubmitReportScreenState extends State<AdviserSubmitReportScreen> {
                           ],
                         ),
                         const Divider(height: 24),
+                        const Text(
+                          '1 file: image up to 5 MB, video up to 20 MB, or PDF up to 10 MB.',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF64748B),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
                         Row(
                           children: [
                             ElevatedButton.icon(
@@ -1054,29 +1100,6 @@ class _AdviserSubmitReportScreenState extends State<AdviserSubmitReportScreen> {
                             ],
                           ],
                         ),
-
-                        if (_isAnalyzingEvidence) ...[
-                          const SizedBox(height: 12),
-                          const Row(
-                            children: [
-                              SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              ),
-                              SizedBox(width: 10),
-                              Text(
-                                'Running AI Evidence Verification...',
-                                style: TextStyle(
-                                  color: Color(0xFF0F766E),
-                                  fontSize: 13,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
 
                         if (_aiVerificationResult != null) ...[
                           const SizedBox(height: 14),
@@ -1111,15 +1134,17 @@ class _AdviserSubmitReportScreenState extends State<AdviserSubmitReportScreen> {
                                       size: 18,
                                     ),
                                     const SizedBox(width: 8),
-                                    Text(
-                                      'AI Verification: ${_aiVerificationResult!.state}',
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        color:
-                                            _aiVerificationResult!.state ==
-                                                'Verified'
-                                            ? const Color(0xFF065F46)
-                                            : const Color(0xFF92400E),
+                                    Expanded(
+                                      child: Text(
+                                        'Evidence status: ${_aiVerificationResult!.state}',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          color:
+                                              _aiVerificationResult!.state ==
+                                                  'Verified'
+                                              ? const Color(0xFF065F46)
+                                              : const Color(0xFF92400E),
+                                        ),
                                       ),
                                     ),
                                   ],

@@ -7,6 +7,11 @@ class StudentModel {
   final String academicYear;
   final String? lrn;
   final String? status;
+  final String? firstName;
+  final String? lastName;
+  final String? middleInitial;
+  final String? gender;
+  final String? parentFullName;
 
   StudentModel({
     required this.id,
@@ -17,6 +22,11 @@ class StudentModel {
     required this.academicYear,
     this.lrn,
     this.status,
+    this.firstName,
+    this.lastName,
+    this.middleInitial,
+    this.gender,
+    this.parentFullName,
   });
 
   factory StudentModel.fromJson(Map<String, dynamic> json) {
@@ -29,6 +39,11 @@ class StudentModel {
       academicYear: json['academic_year'] ?? '',
       lrn: json['lrn']?.toString(),
       status: json['status']?.toString(),
+      firstName: json['first_name']?.toString(),
+      lastName: json['last_name']?.toString(),
+      middleInitial: json['middle_initial']?.toString(),
+      gender: json['gender']?.toString(),
+      parentFullName: json['parent_fullname']?.toString(),
     );
   }
 
@@ -42,6 +57,11 @@ class StudentModel {
       'academic_year': academicYear,
       'lrn': lrn,
       'status': status,
+      'first_name': firstName,
+      'last_name': lastName,
+      'middle_initial': middleInitial,
+      'gender': gender,
+      'parent_fullname': parentFullName,
     };
   }
 }

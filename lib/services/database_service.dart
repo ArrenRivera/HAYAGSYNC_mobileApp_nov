@@ -18,12 +18,58 @@ class DatabaseService extends ChangeNotifier {
   }
 
   // Supabase Base URL
-  static String baseUrl = 'https://zrttfhtmylwbrbvvgfpg.supabase.co';
+  static String baseUrl = 'secret url link';
 
   // Supabase Client
   SupabaseClient get _supabase => Supabase.instance.client;
 
   static const String evidenceBucket = 'hayagsync-evidence';
+  static const String anonymousEvidenceBucket = 'hayagsync-anonymous-evidence';
+  static const String avatarBucket = 'hayagsync-avatars';
+
+  Future<String> uploadProfilePicture({
+    required List<int> bytes,
+    required String fileName,
+    required String contentType,
+  }) async {
+    final authUser = _supabase.auth.currentUser;
+    if (_currentUser == null || authUser == null) {
+      throw Exception('Please sign in before uploading a profile picture.');
+    }
+    final safeName = fileName.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    final objectPath =
+        '${authUser.id}/${DateTime.now().microsecondsSinceEpoch}_$safeName';
+    await _supabase.storage
+        .from(avatarBucket)
+        .uploadBinary(
+          objectPath,
+          Uint8List.fromList(bytes),
+          fileOptions: FileOptions(contentType: contentType, upsert: false),
+        );
+    final publicUrl = _supabase.storage
+        .from(avatarBucket)
+        .getPublicUrl(objectPath);
+    await updateProfilePicture(publicUrl);
+    return publicUrl;
+  }
+
+  Future<String> uploadAnonymousEvidence({
+    required List<int> bytes,
+    required String fileName,
+    required String contentType,
+  }) async {
+    final safeName = fileName.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    final objectPath =
+        'anonymous/${DateTime.now().microsecondsSinceEpoch}_$safeName';
+    await _supabase.storage
+        .from(anonymousEvidenceBucket)
+        .uploadBinary(
+          objectPath,
+          Uint8List.fromList(bytes),
+          fileOptions: FileOptions(contentType: contentType, upsert: false),
+        );
+    return objectPath;
+  }
 
   Future<String> uploadEvidence({
     required List<int> bytes,
@@ -47,8 +93,13 @@ class DatabaseService extends ChangeNotifier {
     return objectPath;
   }
 
-  Future<String> getEvidenceSignedUrl(String objectPath) =>
-      _supabase.storage.from(evidenceBucket).createSignedUrl(objectPath, 3600);
+  Future<String> getEvidenceSignedUrl(String objectPath) => _supabase.storage
+      .from(
+        objectPath.startsWith('anonymous/')
+            ? anonymousEvidenceBucket
+            : evidenceBucket,
+      )
+      .createSignedUrl(objectPath, 3600);
 
   Future<bool> hasAcceptedTerms(String profileId) async {
     final row = await _supabase
@@ -311,12 +362,29 @@ class DatabaseService extends ChangeNotifier {
         _students.add(StudentModel.fromJson(item));
       }
 
+      if (_currentUser?.role == UserRole.parent) {
+        final previousChildId = _selectedChild?.id;
+        final children = (await _fetchParentChildren(
+          fallback: _students.map((student) => student.toJson()).toList(),
+        )).map(StudentModel.fromJson).toList();
+        _currentUser = _currentUser!.copyWith(students: children);
+        StudentModel? retainedSelection;
+        for (final child in children) {
+          if (child.id == previousChildId) {
+            retainedSelection = child;
+            break;
+          }
+        }
+        _selectedChild =
+            retainedSelection ?? (children.isEmpty ? null : children.first);
+      }
+
       // 3. Fetch Directory if Staff
       if (_currentUser != null && _currentUser!.role != UserRole.parent) {
         final dirRes = await _supabase
             .from('users')
             .select(
-              'id, auth_user_id, email, name, role, avatar_url, assigned_section, student_name, student_grade, student_section, academic_year, created_at, updated_at, students(*)',
+              'id, auth_user_id, email, name, contact_number, role, avatar_url, assigned_section, student_name, student_grade, student_section, academic_year, created_at, updated_at, students!students_parent_id_fkey(*)',
             )
             .eq('role', 'parent');
 
@@ -344,25 +412,32 @@ class DatabaseService extends ChangeNotifier {
     } on AuthException catch (e) {
       throw Exception(e.message);
     }
+    late final UserModel profile;
     try {
-      final profile = await _loadCurrentProfile();
+      profile = await _loadCurrentProfile();
+    } catch (e) {
+      await _supabase.auth.signOut();
+      _token = null;
+      _currentUser = null;
+      _selectedChild = null;
+      throw Exception(e.toString().replaceFirst('Exception: ', ''));
+    }
+    try {
       await logLoginAttempt(
         userId: profile.id,
         email: cleanEmail,
         success: true,
       );
-      await syncData();
-      return profile;
-    } catch (_) {
-      await _supabase.auth.signOut();
-      throw Exception(
-        'Walang HayagSync profile ang account na ito. Makipag-ugnayan sa administrator.',
-      );
+    } catch (e) {
+      debugPrint('Could not record successful login attempt: $e');
     }
+    await syncData();
+    return profile;
   }
 
   Future<UserModel> registerParent({
     required String name,
+    required String contactNumber,
     required String email,
     required String password,
     required String studentName,
@@ -389,7 +464,11 @@ class DatabaseService extends ChangeNotifier {
       final response = await _supabase.auth.signUp(
         email: cleanEmail,
         password: password,
-        data: {'name': name.trim(), 'initial_students': initialStudents},
+        data: {
+          'name': name.trim(),
+          'contact_number': contactNumber.trim(),
+          'initial_students': initialStudents,
+        },
       );
       final authUser = response.user;
       if (authUser == null) {
@@ -400,6 +479,7 @@ class DatabaseService extends ChangeNotifier {
           id: authUser.id,
           email: cleanEmail,
           name: name.trim(),
+          contactNumber: contactNumber.trim(),
           role: UserRole.parent,
           studentName: initialStudents.isEmpty
               ? null
@@ -426,13 +506,24 @@ class DatabaseService extends ChangeNotifier {
   Future<UserModel> _loadCurrentProfile() async {
     final authUser = _supabase.auth.currentUser;
     if (authUser == null) throw Exception('Not authenticated.');
-    final profile = await _supabase
+    final profileData = await _supabase
         .from('users')
         .select(
-          'id, auth_user_id, email, name, role, avatar_url, assigned_section, student_name, student_grade, student_section, academic_year, created_at, updated_at, students(*)',
+          'id, auth_user_id, email, name, contact_number, role, avatar_url, assigned_section, student_name, student_grade, student_section, academic_year, created_at, updated_at, students!students_parent_id_fkey(*)',
         )
         .eq('auth_user_id', authUser.id)
-        .single();
+        .maybeSingle();
+    if (profileData == null) {
+      throw Exception(
+        'Walang HayagSync profile ang account na ito. Makipag-ugnayan sa administrator.',
+      );
+    }
+    final profile = Map<String, dynamic>.from(profileData);
+    if (profile['role'] == 'parent') {
+      profile['students'] = await _fetchParentChildren(
+        fallback: profile['students'] as List?,
+      );
+    }
     if (profile['role'] == 'adviser' &&
         (profile['assigned_section'] == null ||
             profile['assigned_section'].toString().isEmpty)) {
@@ -457,6 +548,31 @@ class DatabaseService extends ChangeNotifier {
         : null;
     notifyListeners();
     return _currentUser!;
+  }
+
+  bool _parentChildrenFallbackLogged = false;
+
+  Future<List<Map<String, dynamic>>> _fetchParentChildren({
+    List<dynamic>? fallback,
+  }) async {
+    try {
+      final rows = await _supabase.rpc('get_parent_children');
+      return List<Map<String, dynamic>>.from(rows as List);
+    } catch (e) {
+      if (!_parentChildrenFallbackLogged) {
+        debugPrint(
+          'Linked-child RPC unavailable; using visible student rows. Run supabase_parent_guardians.sql to enable shared parent access. Error: $e',
+        );
+        _parentChildrenFallbackLogged = true;
+      }
+      if (fallback != null) {
+        return fallback
+            .map((row) => Map<String, dynamic>.from(row as Map))
+            .toList();
+      }
+      final rows = await _supabase.from('students').select().order('name');
+      return List<Map<String, dynamic>>.from(rows);
+    }
   }
 
   Future<UserModel?> restoreSession() async {
@@ -609,11 +725,14 @@ class DatabaseService extends ChangeNotifier {
       'witnesses': witnesses != null ? json.encode(witnesses) : null,
     };
 
-    final item = await _supabase
-        .from('reports')
-        .insert(repData)
-        .select()
-        .single();
+    final response = await _supabase.rpc(
+      'submit_parent_report',
+      params: {'p_report': repData},
+    );
+    if (response is! Map) {
+      throw Exception('Supabase returned an unexpected report response.');
+    }
+    final item = Map<String, dynamic>.from(response);
 
     final newReport = ReportModel(
       id: item['id'].toString(),
@@ -643,16 +762,6 @@ class DatabaseService extends ChangeNotifier {
       urgencyLevel: 'Moderate',
     );
 
-    // Add timeline event
-    await _supabase.from('timeline_events').insert({
-      'report_id': item['id'],
-      'title': 'Report Submitted',
-      'description':
-          'Incident report filed by ${_currentUser?.name ?? "parent"}.',
-      'actor_name': _currentUser?.name ?? 'Parent',
-      'actor_role': _currentUser?.roleString ?? 'Parent',
-    });
-
     _reports.insert(0, newReport);
     notifyListeners();
     syncData();
@@ -674,22 +783,28 @@ class DatabaseService extends ChangeNotifier {
     required String urgencyLevel,
     String? evidenceUrl,
   }) async {
+    // Prepare student information
     final studentDisplayName =
         (victimName != null && victimName.trim().isNotEmpty)
         ? victimName.trim()
         : 'Unidentified Student';
+
     final studentGradeName =
         (victimGrade != null && victimGrade.trim().isNotEmpty)
         ? victimGrade.trim()
         : 'Grade 7';
+
     final studentSectionName =
         (victimSection != null && victimSection.trim().isNotEmpty)
         ? victimSection.trim()
         : '$studentGradeName - Section To Be Determined';
+
     final reportTitle = title.trim().isNotEmpty
         ? title.trim()
         : 'Anonymous Bullying Report ($category)';
-    final reportData = {
+
+    // Prepare report data
+    final Map<String, dynamic> reportData = {
       'student_name': studentDisplayName,
       'student_grade': studentGradeName,
       'student_section': studentSectionName,
@@ -697,18 +812,52 @@ class DatabaseService extends ChangeNotifier {
       'description': description.trim(),
       'category': category,
       'incident_date': incidentDate.toIso8601String(),
-      'incident_location': incidentLocation,
+      'incident_location': incidentLocation.trim(),
       'evidence_url': evidenceUrl,
       'bully_name': bullyName?.trim(),
       'bully_grade_section': bullyGradeSection?.trim(),
       'witnesses': witnesses,
       'urgency_level': urgencyLevel,
     };
-    final reportId = await _supabase.rpc(
-      'submit_anonymous_report',
-      params: {'p_report': reportData},
-    );
 
+    // Submit report to Supabase
+    dynamic reportId;
+
+    try {
+      debugPrint('ANONYMOUS REPORT: Starting submission...');
+      debugPrint('ANONYMOUS REPORT: Sending data to Supabase...');
+
+      final rpcResult = await _supabase.rpc(
+        'submit_anonymous_report',
+        params: {'p_report': reportData},
+      );
+
+      // Support either scalar ID or returned row
+      if (rpcResult is Map) {
+        reportId = rpcResult['id'];
+      } else {
+        reportId = rpcResult;
+      }
+
+      if (reportId == null) {
+        throw Exception('Supabase did not return a Case Reference ID.');
+      }
+
+      debugPrint('ANONYMOUS REPORT SUCCESS!');
+      debugPrint('GENERATED CASE ID: $reportId');
+    } on PostgrestException catch (e) {
+      debugPrint('SUPABASE ERROR: ${e.message}');
+      debugPrint('ERROR CODE: ${e.code}');
+      debugPrint('ERROR DETAILS: ${e.details}');
+      debugPrint('ERROR HINT: ${e.hint}');
+
+      throw Exception('Failed to submit anonymous report: ${e.message}');
+    } catch (e) {
+      debugPrint('GENERAL ERROR: $e');
+      rethrow;
+    }
+
+    // Create local report model
     final newReport = ReportModel(
       id: reportId.toString(),
       parentId: '',
@@ -720,9 +869,11 @@ class DatabaseService extends ChangeNotifier {
       description: description.trim(),
       category: category,
       incidentDate: incidentDate,
-      incidentLocation: incidentLocation,
+      incidentLocation: incidentLocation.trim(),
       evidenceUrl: evidenceUrl,
-      evidenceVerificationState: 'Unverified',
+      evidenceVerificationState: evidenceUrl == null || evidenceUrl.isEmpty
+          ? 'No evidence uploaded'
+          : 'Uploaded - Awaiting Review',
       status: 'Pending',
       createdAt: DateTime.now(),
       bullyName: bullyName?.trim(),
@@ -733,9 +884,14 @@ class DatabaseService extends ChangeNotifier {
       reporterName: 'Anonymous Reporter',
       urgencyLevel: urgencyLevel,
     );
+
+    // Update local cache
     _reports.insert(0, newReport);
     notifyListeners();
-    syncData();
+
+    // Refresh data from Supabase
+    // await syncData();
+
     return newReport;
   }
 
@@ -1807,39 +1963,97 @@ class DatabaseService extends ChangeNotifier {
   // --- MULTIPLE CHILDREN MANAGEMENT ---
 
   Future<UserModel> addChild({
-    required String certificateFilename,
     required String studentName,
     required String sectionName,
     required String gradeLevel,
     required String academicYear,
+    required String studentNumber,
+    required String firstName,
+    required String lastName,
+    required String middleInitial,
+    required String gender,
   }) async {
     if (_currentUser == null) throw Exception('Not authenticated.');
 
-    await _supabase.from('students').insert({
-      'parent_id': int.parse(_currentUser!.id),
-      'name': studentName,
-      'grade': gradeLevel,
-      'section': sectionName,
-      'academic_year': academicYear,
-    });
-
-    final uJson = await _supabase
-        .from('users')
-        .select(
-          'id, auth_user_id, email, name, role, avatar_url, assigned_section, student_name, student_grade, student_section, academic_year, created_at, updated_at, students(*)',
-        )
-        .eq('id', int.parse(_currentUser!.id))
-        .single();
-
-    _currentUser = UserModel.fromJson(uJson);
-
-    if (_selectedChild == null &&
-        _currentUser!.students != null &&
-        _currentUser!.students!.isNotEmpty) {
-      _selectedChild = _currentUser!.students!.first;
+    try {
+      await _supabase.rpc(
+        'add_child_to_parent',
+        params: {
+          'p_student_number': studentNumber.trim(),
+          'p_student_name': studentName.trim(),
+          'p_grade': gradeLevel.trim(),
+          'p_section': sectionName.trim(),
+          'p_academic_year': academicYear.trim(),
+          'p_first_name': firstName.trim(),
+          'p_last_name': lastName.trim(),
+          'p_middle_initial': middleInitial.trim(),
+          'p_gender': gender.trim(),
+        },
+      );
+    } on PostgrestException catch (e) {
+      debugPrint('add_child_to_parent failed: ${e.code} ${e.message}');
+      if (e.code == 'PGRST202') {
+        throw Exception(
+          'Supabase is missing add_child_to_parent. Run supabase_add_child.sql in the Supabase SQL Editor, then try again.',
+        );
+      }
+      throw Exception(e.message);
     }
+
+    final previousSelectedChildId = _selectedChild?.id;
+    final children = (await _fetchParentChildren())
+        .map(StudentModel.fromJson)
+        .toList();
+    _currentUser = _currentUser!.copyWith(students: children);
+    StudentModel? previousSelection;
+    for (final child in children) {
+      if (child.id == previousSelectedChildId) {
+        previousSelection = child;
+        break;
+      }
+    }
+    _selectedChild =
+        previousSelection ?? (children.isEmpty ? null : children.first);
     notifyListeners();
     return _currentUser!;
+  }
+
+  Future<String> linkGuardianAccount({
+    required String studentId,
+    required String email,
+  }) async {
+    if (_currentUser?.role != UserRole.parent) {
+      throw Exception('Only a parent account can share child access.');
+    }
+    final result = await _supabase.rpc(
+      'link_child_guardian',
+      params: {
+        'p_student_id': int.parse(studentId),
+        'p_guardian_email': email.trim().toLowerCase(),
+      },
+    );
+    return result.toString();
+  }
+
+  Future<List<Map<String, dynamic>>> getChildGuardians(String studentId) async {
+    final rows = await _supabase.rpc(
+      'get_child_guardians',
+      params: {'p_student_id': int.parse(studentId)},
+    );
+    return List<Map<String, dynamic>>.from(rows as List);
+  }
+
+  Future<void> unlinkGuardianAccount({
+    required String studentId,
+    required String email,
+  }) async {
+    await _supabase.rpc(
+      'unlink_child_guardian',
+      params: {
+        'p_student_id': int.parse(studentId),
+        'p_guardian_email': email.trim().toLowerCase(),
+      },
+    );
   }
 
   // --- AI SUMMARIES ENDPOINTS ---

@@ -125,8 +125,9 @@ class _AiSummaryScreenState extends State<AiSummaryScreen> {
   @override
   Widget build(BuildContext context) {
     final user = _db.currentUser;
-    if (user == null)
+    if (user == null) {
       return const Scaffold(body: Center(child: Text('Unauthorized')));
+    }
 
     return Scaffold(
       backgroundColor: const Color(0xFF0F172A), // Dark Slate

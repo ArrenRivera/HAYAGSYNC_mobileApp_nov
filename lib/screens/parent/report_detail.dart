@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../services/database_service.dart';
+import '../../services/ai_service.dart';
 import '../../models/report_model.dart';
-import '../../widgets/glass_panel.dart';
 import '../../widgets/status_badge.dart';
 import '../../widgets/timeline_widget.dart';
 import '../../widgets/evidence_media_widget.dart';
@@ -76,10 +76,13 @@ class _ReportDetailScreenState extends State<ReportDetailScreen> {
       appBar: AppBar(
         title: Text(
           'Case Ref: ${report.id.substring(0, min(report.id.length, 8)).toUpperCase()}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          softWrap: false,
           style: const TextStyle(
             fontWeight: FontWeight.bold,
-            fontSize: 15,
-            letterSpacing: 0.5,
+            fontSize: 14,
+            letterSpacing: 0.2,
           ),
         ),
         leading: IconButton(
@@ -964,19 +967,35 @@ class _ReportDetailScreenState extends State<ReportDetailScreen> {
 
   Widget _metaRow(IconData icon, String label, String value) {
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(icon, size: 16, color: const Color(0xFF64748B)),
-        const SizedBox(width: 8),
-        Text(
-          '$label: ',
-          style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Icon(icon, size: 16, color: const Color(0xFF64748B)),
         ),
-        Text(
-          value,
-          style: const TextStyle(
-            color: Color(0xFF0F172A),
-            fontSize: 12,
-            fontWeight: FontWeight.bold,
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Color(0xFF64748B),
+                  fontSize: 11,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                value,
+                softWrap: true,
+                style: const TextStyle(
+                  color: Color(0xFF0F172A),
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
           ),
         ),
       ],
@@ -1053,6 +1072,16 @@ class _ReportDetailScreenState extends State<ReportDetailScreen> {
     void Function(double progress) onProgress,
   ) async {
     try {
+      final extension = platformFile.extension?.toLowerCase() ?? '';
+      if ({'jpg', 'jpeg', 'png', 'gif', 'webp'}.contains(extension)) {
+        final path = platformFile.path;
+        if (path == null) throw Exception('The selected image could not be screened.');
+        final screening = await AIService().screenEvidencePhoto(
+          path,
+          platformFile.name,
+        );
+        if (screening.rejected) throw Exception(screening.details);
+      }
       final bytes =
           platformFile.bytes ??
           (platformFile.path == null

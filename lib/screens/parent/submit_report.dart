@@ -15,6 +15,11 @@ class SubmitReportScreen extends StatefulWidget {
 }
 
 class _SubmitReportScreenState extends State<SubmitReportScreen> {
+  static const int _maxEvidenceFiles = 5;
+  static const int _maxTotalEvidenceBytes = 50 * 1024 * 1024;
+  static const int _maxImageBytes = 5 * 1024 * 1024;
+  static const int _maxVideoBytes = 20 * 1024 * 1024;
+  static const int _maxPdfBytes = 10 * 1024 * 1024;
   final _formKey = GlobalKey<FormState>();
   final _titleController = TextEditingController();
   final _descriptionController = TextEditingController();
@@ -138,9 +143,8 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
   ];
 
   final List<SelectedMedia> _selectedMediaList = [];
-  String _evidenceVerificationState = 'Unverified';
+  String _evidenceVerificationState = 'No evidence uploaded';
   String? _evidenceVerificationDetails;
-  bool _isAnalyzingEvidence = false;
   bool _isSubmitting = false;
 
   final _db = DatabaseService();
@@ -321,6 +325,39 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
       media.uploadProgress = 0.0;
     });
 
+    final extension = media.file.extension?.toLowerCase() ?? '';
+    if ({'jpg', 'jpeg', 'png', 'gif', 'webp'}.contains(extension)) {
+      try {
+        final path = media.file.path;
+        if (path == null) {
+          throw Exception('The selected image could not be screened.');
+        }
+        final screening = await AIService().screenEvidencePhoto(
+          path,
+          media.file.name,
+        );
+        if (screening.rejected) {
+          if (!mounted) return;
+          setState(() => _selectedMediaList.remove(media));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(screening.details)),
+          );
+          return;
+        }
+      } catch (_) {
+        if (!mounted) return;
+        setState(() => _selectedMediaList.remove(media));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'The image could not be screened, so it was not uploaded.',
+            ),
+          ),
+        );
+        return;
+      }
+    }
+
     final url = await _uploadFile(media.file, (progress) {
       setState(() {
         media.uploadProgress = progress;
@@ -336,34 +373,11 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
       }
     });
 
-    if (_selectedMediaList.isNotEmpty &&
-        _selectedMediaList.first == media &&
-        url != null) {
-      await _analyzeEvidence(media.file.name);
-    }
-  }
-
-  Future<void> _analyzeEvidence(String filename) async {
-    setState(() {
-      _isAnalyzingEvidence = true;
-      _evidenceVerificationState = 'Verifying...';
-      _evidenceVerificationDetails = null;
-    });
-
-    try {
-      final result = await _ai.verifyEvidencePhoto(filename, 450.0);
+    if (mounted && url != null) {
       setState(() {
-        _evidenceVerificationState = result.state;
-        _evidenceVerificationDetails = result.details;
-      });
-    } catch (e) {
-      setState(() {
-        _evidenceVerificationState = 'Error';
-        _evidenceVerificationDetails = 'Analysis failed: $e';
-      });
-    } finally {
-      setState(() {
-        _isAnalyzingEvidence = false;
+        _evidenceVerificationState = 'Uploaded - Awaiting Review';
+        _evidenceVerificationDetails =
+            'Automated screening found no explicit AI-generation label. This does not prove authenticity; a staff member will review the evidence.';
       });
     }
   }
@@ -379,29 +393,91 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
       );
 
       if (result != null && result.files.isNotEmpty) {
-        for (var file in result.files) {
+        final remainingSlots = _maxEvidenceFiles - _selectedMediaList.length;
+        if (remainingSlots <= 0) {
+          _showEvidenceLimitMessage(
+            'You can attach up to $_maxEvidenceFiles evidence files.',
+          );
+          return;
+        }
+        final acceptedFiles = result.files.take(remainingSlots).toList();
+        var acceptedThisPickBytes = 0;
+        if (result.files.length > remainingSlots) {
+          _showEvidenceLimitMessage(
+            'Only $remainingSlots more file(s) can be added.',
+          );
+        }
+        for (final file in acceptedFiles) {
+          final extension = file.extension?.toLowerCase() ?? '';
+          final isImage = {
+            'jpg',
+            'jpeg',
+            'png',
+            'gif',
+            'webp',
+          }.contains(extension);
+          final isVideo = {'mp4', 'mov', 'webm', '3gp'}.contains(extension);
+          final isPdf = extension == 'pdf';
+          final limit = isImage
+              ? _maxImageBytes
+              : isVideo
+              ? _maxVideoBytes
+              : isPdf
+              ? _maxPdfBytes
+              : 0;
+          if (limit == 0) {
+            _showEvidenceLimitMessage(
+              '${file.name}: unsupported file type. Choose an image, video, or PDF.',
+            );
+            continue;
+          }
+          if (file.size > limit) {
+            final maxMb = limit ~/ (1024 * 1024);
+            _showEvidenceLimitMessage(
+              '${file.name} is too large. Maximum for this type is $maxMb MB.',
+            );
+            continue;
+          }
+          final currentTotal = _selectedMediaList.fold<int>(
+            0,
+            (total, item) => total + item.file.size,
+          );
+          if (currentTotal + acceptedThisPickBytes + file.size >
+              _maxTotalEvidenceBytes) {
+            _showEvidenceLimitMessage(
+              'All evidence files together can be up to 50 MB.',
+            );
+            continue;
+          }
           final media = SelectedMedia(file: file);
           setState(() {
             _selectedMediaList.add(media);
           });
-          _startUpload(media);
+          acceptedThisPickBytes += file.size;
+          unawaited(_startUpload(media));
         }
       }
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Failed to pick files: $e')));
     }
   }
 
+  void _showEvidenceLimitMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
   void _removeMedia(int index) {
     setState(() {
       _selectedMediaList.removeAt(index);
       if (_selectedMediaList.isEmpty) {
-        _evidenceVerificationState = 'Unverified';
+        _evidenceVerificationState = 'No evidence uploaded';
         _evidenceVerificationDetails = null;
-      } else {
-        _analyzeEvidence(_selectedMediaList.first.file.name);
       }
     });
   }
@@ -417,6 +493,16 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Please wait for file attachment upload to finish.'),
+        ),
+      );
+      return;
+    }
+    if (_selectedMediaList.any((media) => media.uploadProgress == -2.0)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Some evidence files failed to upload. Retry or remove them before submitting.',
+          ),
         ),
       );
       return;
@@ -460,10 +546,8 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
 
       // Non-blocking screening state
       final screeningState = evidenceUrls.isNotEmpty
-          ? (_evidenceVerificationState == 'Verifying...'
-                ? 'Screening: Processing'
-                : _evidenceVerificationState)
-          : 'Unverified';
+          ? 'Uploaded - Awaiting Review'
+          : 'No evidence uploaded';
 
       // 2. Immediate Immutable Save (Parent is never blocked by AI latency)
       final newReport = await _db.submitReport(
@@ -852,18 +936,24 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
 
                   // Witnesses Section
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text(
-                        'Who are the Witnesses? (Optional)',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
+                      const Expanded(
+                        child: Text(
+                          'Who are the Witnesses? (Optional)',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
                       TextButton.icon(
                         onPressed: _addWitnessField,
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          minimumSize: const Size(0, 36),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
                         icon: const Icon(
                           Icons.add,
                           size: 16,
@@ -938,7 +1028,7 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
 
                   // Evidence Picker Section
                   const Text(
-                    'Attach Evidence Photo (Optional)',
+                    'Attach Evidence (Optional)',
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: 14,
@@ -947,7 +1037,7 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
                   ),
                   const SizedBox(height: 4),
                   const Text(
-                    'Upload an image showing the incident. The system will scan and verify authenticity using AI analysis.',
+                    'Up to 5 files and 50 MB total. AI-generated images are not accepted; images are screened for detectable AI labels. School staff will review all evidence.',
                     style: TextStyle(color: Colors.grey, fontSize: 12),
                   ),
                   const SizedBox(height: 12),
@@ -1196,7 +1286,7 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
                           Row(
                             children: [
                               const Text(
-                                'AI Verification Status:',
+                                'Evidence status:',
                                 style: TextStyle(
                                   color: Colors.grey,
                                   fontSize: 11,
@@ -1204,34 +1294,33 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
                                 ),
                               ),
                               const Spacer(),
-                              if (_isAnalyzingEvidence)
-                                const SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 1.5,
-                                    color: Colors.white,
-                                  ),
-                                )
-                              else
-                                Container(
+                              Flexible(
+                                child: Container(
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 8,
                                     vertical: 4,
                                   ),
                                   decoration: BoxDecoration(
                                     color:
-                                        _evidenceVerificationState == 'Verified'
+                                        _evidenceVerificationState ==
+                                            'Uploaded - Awaiting Review'
                                         ? Colors.green.withValues(alpha: 0.12)
                                         : Colors.amber.withValues(alpha: 0.12),
                                     borderRadius: BorderRadius.circular(4),
                                   ),
                                   child: Text(
-                                    _evidenceVerificationState.toUpperCase(),
+                                    _evidenceVerificationState ==
+                                            'Uploaded - Awaiting Review'
+                                        ? 'AWAITING STAFF REVIEW'
+                                        : _evidenceVerificationState
+                                              .toUpperCase(),
+                                    textAlign: TextAlign.end,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
                                       color:
                                           _evidenceVerificationState ==
-                                              'Verified'
+                                              'Uploaded - Awaiting Review'
                                           ? Colors.green
                                           : Colors.amber,
                                       fontSize: 10,
@@ -1239,12 +1328,13 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
                                     ),
                                   ),
                                 ),
+                              ),
                             ],
                           ),
                           if (_evidenceVerificationDetails != null) ...[
                             const SizedBox(height: 8),
                             const Text(
-                              'AI Analysis Details:',
+                              'Review information:',
                               style: TextStyle(
                                 color: Colors.grey,
                                 fontSize: 11,
@@ -1269,9 +1359,7 @@ class _SubmitReportScreenState extends State<SubmitReportScreen> {
                   const SizedBox(height: 32),
 
                   ElevatedButton(
-                    onPressed: _isSubmitting || _isAnalyzingEvidence
-                        ? null
-                        : _handleSubmit,
+                    onPressed: _isSubmitting ? null : _handleSubmit,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF6366F1),
                       foregroundColor: Colors.white,

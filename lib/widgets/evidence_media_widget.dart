@@ -550,7 +550,7 @@ class _EvidenceMediaWidgetState extends State<EvidenceMediaWidget> {
                             : Image.network(
                                 _resolvedUrls[_mediaFiles[index]] ?? '',
                                 fit: BoxFit.cover,
-                                errorBuilder: (_, __, ___) => const ColoredBox(
+                                errorBuilder: (_, _, _) => const ColoredBox(
                                   color: Color(0xFF1E293B),
                                   child: Icon(
                                     Icons.image_outlined,
